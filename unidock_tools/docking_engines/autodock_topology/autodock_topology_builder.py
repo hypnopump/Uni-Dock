@@ -3,35 +3,51 @@ import re
 
 import numpy as np
 import networkx as nx
-import glob
-
-from concurrent.futures import ThreadPoolExecutor
 
 from rdkit import Chem
 from rdkit.Chem import GetMolFrags, FragmentOnBonds
 from rdkit.Chem.rdPartialCharges import ComputeGasteigerCharges
 
-from unidock_tools.ligandPrepare.atom_type import AtomType
-from unidock_tools.ligandPrepare.rotatable_bond import RotatableBond
-from unidock_tools.ligandPrepare import utils
+from xdatools.modules.docking_engines.autodock_topology.atom_type import AtomType
+from xdatools.modules.docking_engines.autodock_topology.rotatable_bond import RotatableBond
+from xdatools.modules.docking_engines.autodock_topology import utils
 
-class TopologyBuilder(object):
+class AutoDockTopologyBuilder(object):
     def __init__(self,
                  ligand_sdf_file_name,
+                 covalent_ligand=False,
+                 template_docking=False,
+                 reference_sdf_file_name=None,
                  working_dir_name='.'):
 
         self.ligand_sdf_file_name = ligand_sdf_file_name
+        self.covalent_ligand = covalent_ligand
+        self.template_docking = template_docking
+
+        if reference_sdf_file_name is not None:
+            self.reference_sdf_file_name = os.path.abspath(reference_sdf_file_name)
+        else:
+            self.reference_sdf_file_name = None
+
+        if self.template_docking and self.reference_sdf_file_name:
+            self.reference_mol = Chem.SDMolSupplier(self.reference_sdf_file_name, removeHs=False)[0]
+        else:
+            self.reference_mol = None
 
         self.working_dir_name = os.path.abspath(working_dir_name)
 
         ligand_sdf_base_file_name = os.path.basename(self.ligand_sdf_file_name)
         ligand_file_name_prefix = ligand_sdf_base_file_name.split('.')[0]
 
-        ligand_pdbqt_base_file_name = ligand_file_name_prefix + '.pdbqt'
+        ligand_pdbqt_base_file_name = ligand_file_name_prefix + '_torsion_tree.pdbqt'
         self.ligand_pdbqt_file_name = os.path.join(self.working_dir_name, ligand_pdbqt_base_file_name)
 
-        ligand_torsion_tree_sdf_base_file_name = ligand_file_name_prefix + '_prepared.sdf'
+        ligand_torsion_tree_sdf_base_file_name = ligand_file_name_prefix + '_torsion_tree.sdf'
         self.ligand_torsion_tree_sdf_file_name = os.path.join(self.working_dir_name, ligand_torsion_tree_sdf_base_file_name)
+
+        if self.template_docking:
+            ligand_core_bpf_base_file_name = ligand_file_name_prefix + '_torsion_tree.bpf'
+            self.ligand_core_bpf_file_name = os.path.join(self.working_dir_name, ligand_core_bpf_base_file_name)
 
         self.atom_typer = AtomType()
         self.rotatable_bond_finder = RotatableBond()
@@ -39,13 +55,63 @@ class TopologyBuilder(object):
     def build_molecular_graph(self):
         mol = Chem.SDMolSupplier(self.ligand_sdf_file_name, removeHs=False)[0]
 
+        if self.covalent_ligand:
+            mol, covalent_anchor_atom_info = utils.prepare_covalent_ligand_mol(mol)
+        else:
+            covalent_anchor_atom_info = None
+
+        if self.template_docking:
+            core_atom_idx_list = utils.get_core_alignment_for_template_docking(self.reference_mol, mol)
+            for core_atom_idx in core_atom_idx_list:
+                core_atom = mol.GetAtomWithIdx(core_atom_idx)
+                for neighbor_atom in core_atom.GetNeighbors():
+                    if neighbor_atom.GetIdx() not in core_atom_idx_list:
+                        core_atom_idx_list.remove(core_atom_idx)
+                        break
+
+        else:
+            core_atom_idx_list = None
 
         self.atom_typer.assign_atom_types(mol)
         ComputeGasteigerCharges(mol)
         utils.assign_atom_properties(mol)
         rotatable_bond_info_list = self.rotatable_bond_finder.identify_rotatable_bonds(mol)
 
-    
+        ## Freeze bonds in covalent part to be unrotatable for covalent ligand case
+        ##############################################################################
+#        if self.covalent_ligand:
+#            covalent_atom_idx_list = []
+#            num_atoms = mol.GetNumAtoms()
+#            for atom_idx in range(num_atoms):
+#                atom = mol.GetAtomWithIdx(atom_idx)
+#                if atom.GetProp('residue_name') != 'MOL':
+#                    covalent_atom_idx_list.append(atom_idx)
+#
+#            filtered_rotatable_bond_info_list = []
+#            for rotatable_bond_info in rotatable_bond_info_list:
+#                if rotatable_bond_info[0] in covalent_atom_idx_list and rotatable_bond_info[1] in covalent_atom_idx_list:
+#                    continue
+#                else:
+#                    filtered_rotatable_bond_info_list.append(rotatable_bond_info)
+#
+#            rotatable_bond_info_list = filtered_rotatable_bond_info_list
+        ##############################################################################
+
+        ## Freeze bonds in core part to be unrotatable for template docking case
+        ###############################################################################
+        if self.template_docking:
+            filtered_rotatable_bond_info_list = []
+            for rotatable_bond_info in rotatable_bond_info_list:
+                rotatable_begin_atom_idx = rotatable_bond_info[0]
+                rotatable_end_atom_idx = rotatable_bond_info[1]
+                if rotatable_begin_atom_idx in core_atom_idx_list and rotatable_end_atom_idx in core_atom_idx_list:
+                    continue
+                else:
+                    filtered_rotatable_bond_info_list.append(rotatable_bond_info)
+
+            rotatable_bond_info_list = filtered_rotatable_bond_info_list
+        ###############################################################################
+
         bond_list = list(mol.GetBonds())
         rotatable_bond_idx_list = []
         for bond in bond_list:
@@ -54,8 +120,11 @@ class TopologyBuilder(object):
             if bond_info in rotatable_bond_info_list or bond_info_reversed in rotatable_bond_info_list:
                 rotatable_bond_idx_list.append(bond.GetIdx())
 
-        splitted_mol = FragmentOnBonds(mol, rotatable_bond_idx_list, addDummies=False)
-        splitted_mol_list = list(GetMolFrags(splitted_mol, asMols=True, sanitizeFrags=False))
+        if len(rotatable_bond_idx_list) != 0:
+            splitted_mol = FragmentOnBonds(mol, rotatable_bond_idx_list, addDummies=False)
+            splitted_mol_list = list(GetMolFrags(splitted_mol, asMols=True, sanitizeFrags=False))
+        else:
+            splitted_mol_list = [mol]
 
         num_fragments = len(splitted_mol_list)
 
@@ -68,7 +137,38 @@ class TopologyBuilder(object):
             num_fragment_atoms_list[fragment_idx] = num_atoms
 
         root_fragment_idx = None
-        root_fragment_idx = np.argmax(num_fragment_atoms_list)
+        if self.covalent_ligand:
+            for fragment_idx in range(num_fragments):
+                fragment = splitted_mol_list[fragment_idx]
+                for atom in fragment.GetAtoms():
+                    atom_info = (atom.GetProp('chain_idx'), atom.GetProp('residue_name'), atom.GetIntProp('residue_idx'), atom.GetProp('atom_name'))
+                    if atom_info == covalent_anchor_atom_info:
+                        root_fragment_idx = fragment_idx
+                        break
+
+                if root_fragment_idx is not None:
+                    break
+
+            if root_fragment_idx is None:
+                raise ValueError('Bugs in root finding code for covalent docking!')
+
+        elif self.template_docking:
+            for fragment_idx in range(num_fragments):
+                fragment = splitted_mol_list[fragment_idx]
+                for atom in fragment.GetAtoms():
+                    internal_atom_idx = int(re.split(r'(\d+)', atom.GetProp('atom_name'))[1]) - 1
+                    if internal_atom_idx in core_atom_idx_list:
+                        root_fragment_idx = fragment_idx
+                        break
+
+                if root_fragment_idx is not None:
+                    break
+
+            if root_fragment_idx is None:
+                raise ValueError('Bugs in root finding code for template docking!')
+
+        else:
+            root_fragment_idx = np.argmax(num_fragment_atoms_list)
         ##############################################################################
 
         ## Build torsion tree
@@ -344,7 +444,7 @@ class TopologyBuilder(object):
             for atom_info_dict in atom_info_list:
                 fragment_info_string += str(atom_info_dict['sdf_atom_idx'])
                 fragment_info_string += ' '
-    
+
             fragment_info_string = fragment_info_string[:-1]
             fragment_info_string += '\n'
 
@@ -360,13 +460,13 @@ class TopologyBuilder(object):
             torsion_info_string += f'{begin_sdf_atom_idx} {end_sdf_atom_idx} {begin_node_idx} {end_node_idx}'
             torsion_info_string += '\n'
 
+        atom_info_line_format = '{:<3d}{:<10f}{:<2s}\n'
         for atom in self.mol.GetAtoms():
-            sdf_atom_idx = str(atom.GetIntProp('sdf_atom_idx'))
-            charge = str(atom.GetDoubleProp('charge'))
+            sdf_atom_idx = atom.GetIntProp('sdf_atom_idx')
+            charge = atom.GetDoubleProp('charge')
             atom_type = atom.GetProp('atom_type')
-            atom_info = str(sdf_atom_idx).ljust(3) + str(charge)[:10].ljust(10) + atom_type.ljust(2)
-            atom_info_string += atom_info
-            atom_info_string += '\n'
+
+            atom_info_string += atom_info_line_format.format(sdf_atom_idx, charge, atom_type)
 
         self.mol.SetProp('fragInfo', fragment_info_string)
         self.mol.SetProp('torsionInfo', torsion_info_string)
@@ -376,36 +476,3 @@ class TopologyBuilder(object):
         writer.write(self.mol)
         writer.flush()
         writer.close()
-
-def prepare_ligands(SDFFiles, output_dir='./ligands_prepared'):
-    os.makedirs(output_dir, exist_ok=True)
-
-    def _convert_file(ligand):
-        basename =  os.path.basename(ligand)
-        basename_prefix = basename.split('.')[0]
-        try:
-            topo=TopologyBuilder(ligand, output_dir)
-            topo.build_molecular_graph()
-            topo.write_torsion_tree_sdf_file()
-            print("ligand %s preperation successful"%basename_prefix)
-        except Exception as e:
-            print("%s, ligand %s preperation failed"%(e, basename_prefix))
-
-
-    with ThreadPoolExecutor() as executor:
-        executor.map(_convert_file, SDFFiles)
-    
-    basenames =  [os.path.basename(ligand) for ligand in SDFFiles]
-    basename_prefixs = [basename.split('.')[0] for basename in basenames]
-    
-    ligands_prepared = []
-    for basename_prefix in basename_prefixs:
-        ligand_prepared_filename = "%s/%s_prepared.sdf"%(output_dir, basename_prefix)
-        if os.path.exists(ligand_prepared_filename):
-            ligands_prepared.append(ligand_prepared_filename)
-
-    ligands_num = len(SDFFiles)
-    ligands_prepared_num = len(ligands_prepared)
-    print("%d sdf format ligands have been prepared successfully in total %d"%(ligands_prepared_num, ligands_num))
-
-    return ligands_prepared
