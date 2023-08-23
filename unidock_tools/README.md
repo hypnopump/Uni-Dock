@@ -32,12 +32,12 @@ By installing UniDockTools, you have obtained an executable file called **Unidoc
 
 ## 1. input ligands with origin sdf format
 
-    Unidock --receptor receptor.pdbqt --gpu_batch ligand1.sdf ligand2.sdf --center_x 9 --center_y -5  --center_z -5 --size_x 20  --size_y 20 --size_z 20 --search_mode banlance --num_modes 9 --seed 123 --dir .
+    Unidock --receptor receptor.pdbqt --gpu_batch ligand1.sdf ligand2.sdf --center_x 9 --center_y -5  --center_z -5 --size_x 20  --size_y 20 --size_z 20 --search_mode balance --num_modes 9 --seed 123 --dir .
 
 
 ## 2. use gnina CNNscores to rescore docking poses
 
-    Unidock --receptor receptor.pdbqt --gpu_batch ligand1.sdf ligand2.sdf  --scoring gnina --center_x 9 --center_y -5  --center_z -5 --size_x 20  --size_y 20 --size_z 20 --search_mode banlance --num_modes 9 --seed 123 --dir .
+    Unidock --receptor receptor.pdbqt --gpu_batch ligand1.sdf ligand2.sdf  --scoring gnina --center_x 9 --center_y -5  --center_z -5 --size_x 20  --size_y 20 --size_z 20 --search_mode balance --num_modes 9 --seed 123 --dir .
 ## 3. other usage
 
 To lower users' learning cost, the other usage methods of **Unidock** remain consistent with the usage of **unidock**.
